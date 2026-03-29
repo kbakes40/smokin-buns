@@ -16,14 +16,17 @@ const HERO_NAV_DEBOUNCE_MS = 1200;
 const BURGER_GAP_BELOW_TEXT_PX = -48;
 const EXPLODED_BURGER_LIFT_Y_PX = 195;
 
-/* ── Transition timing (continuous scroll feel, wheel-driven) ── */
+/* ── Transition timing (wheel-driven slides) ── */
+const HERO_TRANS_MS = 800;
+const HERO_BG_EASE = "cubic-bezier(0.22, 0.94, 0.32, 1)";
 const TRANSITION_MS = 1400;
-const BG_WIPE_MS = 900;
-const BG_WIPE_EASE = "cubic-bezier(0.4, 0, 0.2, 1)";
 const TEXT_ENTER_MS = 800;
 const TEXT_ENTER_EASE_CSS = "cubic-bezier(0.22, 1, 0.36, 1)";
 const TEXT_ENTER_STAGGER_MS = 80;
 const TEXT_ENTER_DELAY_AFTER_BURGER_MS = 200;
+/** Outgoing headline copy fades out while the slide exits */
+const TEXT_FADE_OUT_MS = 550;
+const TEXT_FADE_OUT_EASE = "ease-out";
 const CHIP_FADE_OUT_MS = 500;
 const CHIP_FADE_IN_MS = 600;
 const CHIP_FADE_IN_DELAY_MS = 900;
@@ -370,7 +373,7 @@ function FloatingChips({
   );
 }
 
-type TransPhase = "idle" | "wipe-and-exit" | "enter-new";
+type TransPhase = "idle" | "exiting" | "entering";
 
 export function HeroSlider() {
   const [index, setIndex] = useState(0);
@@ -383,8 +386,6 @@ export function HeroSlider() {
   const [burgerPhase, setBurgerPhase] = useState<
     "idle" | "melting-exit" | "assembling-enter"
   >("idle");
-  const [bgWipeTarget, setBgWipeTarget] = useState<string | null>(null);
-  const [bgWipeActive, setBgWipeActive] = useState(false);
 
   const pendingIndexRef = useRef<number | null>(null);
   const lastNavRef = useRef(0);
@@ -428,8 +429,6 @@ export function HeroSlider() {
         setIsExploded(false);
         setTransPhase("idle");
         setBurgerPhase("idle");
-        setBgWipeTarget(null);
-        setBgWipeActive(false);
         pendingIndexRef.current = null;
         clearTimers();
       }
@@ -463,35 +462,23 @@ export function HeroSlider() {
         setIsExploded(false);
         setBurgerPhase("idle");
         setTransPhase("idle");
-        setBgWipeTarget(null);
-        setBgWipeActive(false);
         pendingIndexRef.current = null;
         transitioningRef.current = false;
         return;
       }
 
-      const target = heroSlides[targetIndex]!;
       pendingIndexRef.current = targetIndex;
       setIsExploded(false);
 
-      setTransPhase("wipe-and-exit");
+      setTransPhase("exiting");
       setBurgerPhase("melting-exit");
-      setBgWipeTarget(target.background);
 
-      const t1 = setTimeout(() => {
-        setBgWipeActive(true);
-      }, 16);
-      timersRef.current.push(t1);
-
-      const switchMs = BG_WIPE_MS * 0.65;
       const t2 = setTimeout(() => {
         setIndex(targetIndex);
-        setTransPhase("enter-new");
+        setTransPhase("entering");
         setBurgerPhase("assembling-enter");
-        setBgWipeTarget(null);
-        setBgWipeActive(false);
         pendingIndexRef.current = null;
-      }, switchMs);
+      }, HERO_TRANS_MS);
       timersRef.current.push(t2);
 
       const t3 = setTimeout(() => {
@@ -591,8 +578,8 @@ export function HeroSlider() {
   }, [isExploded]);
 
   const burgerScrollLayerMotion = "idle" as const;
-  const isWiping = transPhase === "wipe-and-exit";
-  const isEntering = transPhase === "enter-new";
+  const isExiting = transPhase === "exiting";
+  const isEntering = transPhase === "entering";
 
   const HERO_TRANS_EASE = "cubic-bezier(0.22, 0.94, 0.32, 1)";
 
@@ -607,27 +594,29 @@ export function HeroSlider() {
         {slide.featuredItemName} {slide.price}.
       </span>
 
-      <div className={cn("absolute inset-0 z-0", slide.background)} />
-
-      {bgWipeTarget && (
+      {heroSlides.map((s, i) => (
         <div
+          key={s.id}
+          aria-hidden={i !== index}
           className={cn(
-            "absolute inset-0 z-[22] will-change-transform",
-            bgWipeTarget,
+            "absolute inset-0 z-0",
+            s.background,
+            i === index ? "opacity-100" : "opacity-0",
           )}
-          style={{
-            transform: bgWipeActive ? "translateY(0)" : "translateY(100%)",
-            transition: bgWipeActive
-              ? `transform ${BG_WIPE_MS}ms ${BG_WIPE_EASE}`
-              : "none",
-          }}
+          style={
+            reduceMotion
+              ? undefined
+              : {
+                  transition: `opacity ${HERO_TRANS_MS}ms ${HERO_BG_EASE}`,
+                }
+          }
         />
-      )}
+      ))}
 
       <div className="pointer-events-none absolute inset-0 z-[3] bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(0,0,0,0.1)_100%)]" />
 
       <FloatingChips
-        hidden={isExploded || isWiping}
+        hidden={isExploded || isExiting}
         entering={isEntering}
         reduceMotion={reduceMotion}
       />
@@ -674,7 +663,20 @@ export function HeroSlider() {
           isExploded && "opacity-0 transition-opacity duration-300",
         )}
       >
-        <div className="pointer-events-auto">
+        <div
+          className="pointer-events-auto will-change-[opacity]"
+          style={
+            reduceMotion || isExploded
+              ? undefined
+              : {
+                  opacity: isExiting ? 0 : 1,
+                  /* Fade out only while exiting; snap visible for idle + enter so rise-in reads clearly */
+                  transition: isExiting
+                    ? `opacity ${TEXT_FADE_OUT_MS}ms ${TEXT_FADE_OUT_EASE}`
+                    : undefined,
+                }
+          }
+        >
           {isEntering ? (
             <HeroTextRiseIn key={`text-enter-${index}`} slide={slide} />
           ) : (
