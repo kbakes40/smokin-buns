@@ -2,6 +2,7 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import {
   assembledContentHeightPx,
   burgerLayers,
@@ -19,6 +20,8 @@ export type BurgerScrollLayerMotion =
   | "enterLoose"
   | "enterTight";
 
+export type SlideTransitionPhase = "idle" | "melting-exit" | "assembling-enter";
+
 export type BurgerStackProps = {
   exploded: boolean;
   onToggle?: () => void;
@@ -28,6 +31,9 @@ export type BurgerStackProps = {
   showGarnish?: boolean;
   className?: string;
   scrollLayerMotion?: BurgerScrollLayerMotion;
+  slideTransition?: SlideTransitionPhase;
+  onExitComplete?: () => void;
+  onEnterComplete?: () => void;
 };
 
 const BURGER_EASE = "cubic-bezier(0.22, 0.94, 0.32, 1)";
@@ -314,6 +320,97 @@ export function HeroGarnish({
   );
 }
 
+/* ── Per-layer melting waterfall constants ── */
+const MELT_STAGGER_S = 0.09;
+const MELT_EASE: [number, number, number, number] = [0.4, 0, 0.6, 1];
+const MELT_DURATION_S = 1.4;
+const MELT_EXIT_SCALE = 0.96;
+
+const ASSEMBLE_STAGGER_S = 0.1;
+const ASSEMBLE_ENTRY_Y = -800;
+const ASSEMBLE_ENTRY_SCALE = 0.94;
+const ASSEMBLE_SPRING = { stiffness: 55, damping: 16 };
+
+const LAYER_COUNT = burgerLayers.length;
+
+function MeltLayer({
+  children,
+  isMelting,
+  isAssembling,
+  exitDelay,
+  enterDelay,
+  topPx,
+  zIndex,
+  isExploded,
+  layerMotion,
+}: {
+  children: ReactNode;
+  isMelting: boolean;
+  isAssembling: boolean;
+  exitDelay: number;
+  enterDelay: number;
+  topPx: number;
+  zIndex: number;
+  isExploded: boolean;
+  layerMotion: string;
+}) {
+  const isAnimating = isMelting || isAssembling;
+
+  const meltTarget = useMemo(() => {
+    if (typeof window === "undefined") return 1200;
+    return Math.round(window.innerHeight * 1.2);
+  }, []);
+
+  const animateValues = isMelting
+    ? { y: meltTarget, scale: MELT_EXIT_SCALE, opacity: 0 }
+    : isAssembling
+      ? { y: 0, scale: 1, opacity: 1 }
+      : { y: 0, scale: 1, opacity: 1 };
+
+  const transition = isMelting
+    ? {
+        y: { duration: MELT_DURATION_S, ease: MELT_EASE, delay: exitDelay },
+        scale: { duration: MELT_DURATION_S, ease: MELT_EASE, delay: exitDelay },
+        opacity: { duration: MELT_DURATION_S * 0.2, ease: "easeIn" as const, delay: exitDelay + MELT_DURATION_S * 0.8 },
+      }
+    : isAssembling
+      ? {
+          y: { type: "spring" as const, ...ASSEMBLE_SPRING, delay: enterDelay },
+          scale: { type: "spring" as const, ...ASSEMBLE_SPRING, delay: enterDelay },
+          opacity: { duration: 0.15, delay: enterDelay },
+        }
+      : { duration: 0 };
+
+  const initial = isAssembling
+    ? { y: ASSEMBLE_ENTRY_Y, scale: ASSEMBLE_ENTRY_SCALE, opacity: 0 }
+    : undefined;
+
+  return (
+    <motion.div
+      className={cn(
+        "absolute left-1/2 flex min-w-0 -translate-x-1/2 flex-col items-center will-change-transform",
+        !isAnimating && layerMotion,
+      )}
+      initial={initial}
+      animate={animateValues}
+      transition={transition}
+      style={{
+        top: topPx,
+        zIndex,
+        transitionDuration: isAnimating ? undefined : "var(--burger-dur)",
+        width: isExploded
+          ? "min(100vw - 1rem, 56rem)"
+          : "min(100vw - 1.25rem, 500px)",
+        maxWidth: isExploded
+          ? "min(100vw - 1rem, 56rem)"
+          : "min(100vw - 1.25rem, 500px)",
+      }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
 function BurgerStackLayers({
   exploded,
   garnishType,
@@ -321,8 +418,21 @@ function BurgerStackLayers({
   reduceMotion = false,
   showGarnish = true,
   scrollLayerMotion = "idle",
+  slideTransition = "idle",
+  onExitComplete,
+  onEnterComplete,
 }: Omit<BurgerStackProps, "onToggle" | "className">) {
   const isExploded = exploded === true;
+  const exitTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const enterTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const phaseCounterRef = useRef(0);
+
+  const prevTransitionRef = useRef(slideTransition);
+  if (prevTransitionRef.current !== slideTransition) {
+    prevTransitionRef.current = slideTransition;
+    phaseCounterRef.current += 1;
+  }
+  const phaseKey = phaseCounterRef.current;
 
   const layerMotion = reduceMotion
     ? ""
@@ -372,6 +482,46 @@ function BurgerStackLayers({
     ? explodedMetrics.totalHeight
     : assembledMetrics.totalHeight;
 
+  const isMelting = slideTransition === "melting-exit";
+  const isAssembling = slideTransition === "assembling-enter";
+  const isTransitioning = isMelting || isAssembling;
+
+  const exitCalledRef = useRef(false);
+  const enterCalledRef = useRef(false);
+
+  useEffect(() => {
+    exitTimersRef.current.forEach(clearTimeout);
+    exitTimersRef.current = [];
+    enterTimersRef.current.forEach(clearTimeout);
+    enterTimersRef.current = [];
+    exitCalledRef.current = false;
+    enterCalledRef.current = false;
+  }, [slideTransition]);
+
+  useEffect(() => {
+    if (isMelting && onExitComplete && !exitCalledRef.current) {
+      const totalMs = (MELT_DURATION_S + MELT_STAGGER_S * (LAYER_COUNT - 1)) * 1000 + 50;
+      const t = setTimeout(() => {
+        exitCalledRef.current = true;
+        onExitComplete();
+      }, totalMs);
+      exitTimersRef.current.push(t);
+      return () => clearTimeout(t);
+    }
+  }, [isMelting, onExitComplete]);
+
+  useEffect(() => {
+    if (isAssembling && onEnterComplete && !enterCalledRef.current) {
+      const totalMs = (0.6 + ASSEMBLE_STAGGER_S * (LAYER_COUNT - 1)) * 1000 + 400;
+      const t = setTimeout(() => {
+        enterCalledRef.current = true;
+        onEnterComplete();
+      }, totalMs);
+      enterTimersRef.current.push(t);
+      return () => clearTimeout(t);
+    }
+  }, [isAssembling, onEnterComplete]);
+
   return (
     <>
       <div
@@ -379,11 +529,11 @@ function BurgerStackLayers({
           "relative mx-auto w-full max-w-[500px] leading-none",
           compact && !isExploded && "max-w-full",
           isExploded && "max-w-[min(100vw-1.25rem,min(94vw,56rem))]",
-          !reduceMotion && "transition-[height] [transition-timing-function:var(--burger-ease)]",
+          !reduceMotion && !isTransitioning && "transition-[height] [transition-timing-function:var(--burger-ease)]",
         )}
         style={{
           height: containerHeight,
-          transitionDuration: reduceMotion ? undefined : "var(--burger-dur)",
+          transitionDuration: reduceMotion || isTransitioning ? undefined : "var(--burger-dur)",
         }}
       >
         {showGarnish && (
@@ -396,24 +546,21 @@ function BurgerStackLayers({
           const topExploded = explodedMetrics.tops[i]!;
           const topPx = isExploded ? topExploded : topAssembled;
 
+          const reverseIdx = LAYER_COUNT - 1 - i;
+          const exitDelay = reverseIdx * MELT_STAGGER_S;
+          const enterDelay = i * ASSEMBLE_STAGGER_S;
+
           return (
-            <div
-              key={layer.id}
-              className={cn(
-                "absolute left-1/2 flex min-w-0 -translate-x-1/2 flex-col items-center",
-                layerMotion,
-              )}
-              style={{
-                top: topPx,
-                zIndex: L.zIndex,
-                transitionDuration: "var(--burger-dur)",
-                width: isExploded
-                  ? "min(100vw - 1rem, 56rem)"
-                  : "min(100vw - 1.25rem, 500px)",
-                maxWidth: isExploded
-                  ? "min(100vw - 1rem, 56rem)"
-                  : "min(100vw - 1.25rem, 500px)",
-              }}
+            <MeltLayer
+              key={`${layer.id}-${phaseKey}`}
+              isMelting={isMelting && !isExploded && !reduceMotion}
+              isAssembling={isAssembling && !isExploded && !reduceMotion}
+              exitDelay={exitDelay}
+              enterDelay={enterDelay}
+              topPx={topPx}
+              zIndex={L.zIndex}
+              isExploded={isExploded}
+              layerMotion={layerMotion}
             >
               <div
                 className={cn(
@@ -465,7 +612,7 @@ function BurgerStackLayers({
                   )}
                 </div>
               </div>
-            </div>
+            </MeltLayer>
           );
         })}
 
@@ -475,6 +622,7 @@ function BurgerStackLayers({
             isExploded
               ? "bottom-[-2.5rem] h-[4rem] w-[min(90%,500px)] sm:bottom-[-3rem] sm:h-[4.5rem] sm:w-[min(88%,520px)]"
               : "bottom-[-0.75rem] h-[3.5rem] w-[min(88%,420px)] sm:bottom-[-1rem] sm:h-[4.25rem] sm:w-[min(86%,480px)]",
+            isMelting && !isExploded && "!opacity-0",
           )}
           style={{ transitionDuration: "var(--burger-dur)" }}
           aria-hidden
@@ -493,6 +641,9 @@ export function BurgerStack({
   showGarnish = true,
   className,
   scrollLayerMotion = "idle",
+  slideTransition = "idle",
+  onExitComplete,
+  onEnterComplete,
 }: BurgerStackProps) {
   const isExploded = explodedProp === true;
 
@@ -515,6 +666,9 @@ export function BurgerStack({
       reduceMotion={reduceMotion}
       showGarnish={showGarnish}
       scrollLayerMotion={scrollLayerMotion}
+      slideTransition={slideTransition}
+      onExitComplete={onExitComplete}
+      onEnterComplete={onEnterComplete}
     />
   );
 

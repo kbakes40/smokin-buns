@@ -2,21 +2,31 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import { BurgerStack } from "@/components/BurgerStack";
-import { heroSideSocialLabels, heroSlides, type HeroSlide } from "@/data/heroSlides";
+import {
+  heroSideSocialLabels,
+  heroSlides,
+  type HeroSlide,
+} from "@/data/heroSlides";
 import { business } from "@/data/site";
 import { cn } from "@/lib/cn";
 
-const HERO_TRANS_MS = 800;
-const HERO_TRANS_EASE = "cubic-bezier(0.22, 0.94, 0.32, 1)";
-const HERO_NAV_DEBOUNCE_MS = 1000;
-/** Space below featured line to burger (px). Negative = overlap into text. ~half inch up. */
+const HERO_NAV_DEBOUNCE_MS = 1200;
 const BURGER_GAP_BELOW_TEXT_PX = -48;
-/**
- * When exploded, shift only the burger (not bg/garnish) upward so the stack stays in view.
- * Larger = more lift. Tune 150–220 vs viewport.
- */
 const EXPLODED_BURGER_LIFT_Y_PX = 195;
+
+/* ── Transition timing (continuous scroll feel, wheel-driven) ── */
+const TRANSITION_MS = 1400;
+const BG_WIPE_MS = 900;
+const BG_WIPE_EASE = "cubic-bezier(0.4, 0, 0.2, 1)";
+const TEXT_ENTER_MS = 800;
+const TEXT_ENTER_EASE_CSS = "cubic-bezier(0.22, 1, 0.36, 1)";
+const TEXT_ENTER_STAGGER_MS = 80;
+const TEXT_ENTER_DELAY_AFTER_BURGER_MS = 200;
+const CHIP_FADE_OUT_MS = 500;
+const CHIP_FADE_IN_MS = 600;
+const CHIP_FADE_IN_DELAY_MS = 900;
 
 function socialHrefForLabel(label: string): string {
   const l = label.toLowerCase();
@@ -55,31 +65,312 @@ function OutlineSideText() {
   );
 }
 
-function HeroHeadlineStack({ index }: { index: number }) {
-  const s = heroSlides[index]!;
+function HeroTextRiseIn({ slide }: { slide: HeroSlide }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setMounted(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  const items = [
+    {
+      key: "title",
+      staggerIdx: 0,
+      el: (
+        <h1 className="max-w-[16ch] font-sans text-[clamp(2.5rem,8vw,6.5rem)] font-black leading-[0.95] tracking-tight text-white drop-shadow-md">
+          {slide.title}
+        </h1>
+      ),
+    },
+    {
+      key: "subtitle",
+      staggerIdx: 1,
+      el: (
+        <p className="font-accent-serif max-w-xl text-base italic text-white/90 sm:text-lg">
+          {slide.subtitle}
+        </p>
+      ),
+    },
+    {
+      key: "price",
+      staggerIdx: 2,
+      el: (
+        <p className="text-sm font-medium text-white/75">
+          <span className="text-white/90">{slide.featuredItemName}</span>
+          <span className="mx-2 text-white/40">·</span>
+          <span className="font-sans text-lg font-bold tabular-nums text-white sm:text-xl">
+            {slide.price}
+          </span>
+        </p>
+      ),
+    },
+  ];
+
   return (
-    <div
-      key={s.id}
-      className="relative z-[1] flex w-full max-w-5xl flex-col items-center gap-5 text-center"
-    >
+    <div className="relative z-[1] flex w-full max-w-5xl flex-col items-center gap-5 text-center">
+      {items.map((item) => {
+        const enterDelay =
+          TEXT_ENTER_DELAY_AFTER_BURGER_MS +
+          (items.length - 1 - item.staggerIdx) * TEXT_ENTER_STAGGER_MS;
+
+        return (
+          <div
+            key={item.key}
+            className="will-change-transform"
+            style={{
+              transform: mounted ? "translateY(0)" : "translateY(60px)",
+              opacity: mounted ? 1 : 0,
+              transition: `transform ${TEXT_ENTER_MS}ms ${TEXT_ENTER_EASE_CSS} ${enterDelay}ms, opacity ${TEXT_ENTER_MS}ms ${TEXT_ENTER_EASE_CSS} ${enterDelay}ms`,
+            }}
+          >
+            {item.el}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HeroTextStatic({ slide }: { slide: HeroSlide }) {
+  return (
+    <div className="relative z-[1] flex w-full max-w-5xl flex-col items-center gap-5 text-center">
       <h1 className="max-w-[16ch] font-sans text-[clamp(2.5rem,8vw,6.5rem)] font-black leading-[0.95] tracking-tight text-white drop-shadow-md">
-        {s.title}
+        {slide.title}
       </h1>
       <p className="font-accent-serif max-w-xl text-base italic text-white/90 sm:text-lg">
-        {s.subtitle}
+        {slide.subtitle}
       </p>
       <p className="text-sm font-medium text-white/75">
-        <span className="text-white/90">{s.featuredItemName}</span>
+        <span className="text-white/90">{slide.featuredItemName}</span>
         <span className="mx-2 text-white/40">·</span>
         <span className="font-sans text-lg font-bold tabular-nums text-white sm:text-xl">
-          {s.price}
+          {slide.price}
         </span>
       </p>
     </div>
   );
 }
 
-type HeroAnimPhase = "idle" | "exiting" | "entering";
+type FloatingChipDef = {
+  src: string;
+  size: string;
+  top: string;
+  left: string;
+  rotateDeg: number;
+  opacity: number;
+  driftY: number;
+  driftRotate: number;
+  duration: number;
+  delay: number;
+  blurPx?: number;
+};
+
+const FLOATING_CHIPS: FloatingChipDef[] = [
+  {
+    src: "/images/chips/chip-1.png",
+    size: "clamp(62px, 7vw, 98px)",
+    top: "33%",
+    left: "36%",
+    rotateDeg: -28,
+    opacity: 1,
+    driftY: 10,
+    driftRotate: 8,
+    duration: 5.0,
+    delay: 0,
+  },
+  {
+    src: "/images/chips/chip-2.png",
+    size: "clamp(20px, 2.2vw, 30px)",
+    top: "24%",
+    left: "37%",
+    rotateDeg: -10,
+    opacity: 0.5,
+    driftY: 7,
+    driftRotate: 5,
+    duration: 4.4,
+    delay: 0.4,
+    blurPx: 2.5,
+  },
+  {
+    src: "/images/chips/chip-3.png",
+    size: "clamp(42px, 4.8vw, 68px)",
+    top: "45%",
+    left: "38%",
+    rotateDeg: -20,
+    opacity: 0.95,
+    driftY: 12,
+    driftRotate: 9,
+    duration: 5.4,
+    delay: 0.8,
+  },
+  {
+    src: "/images/chips/chip-4.png",
+    size: "clamp(30px, 3.4vw, 46px)",
+    top: "54%",
+    left: "36%",
+    rotateDeg: -16,
+    opacity: 0.88,
+    driftY: 9,
+    driftRotate: 7,
+    duration: 4.0,
+    delay: 1.2,
+  },
+  {
+    src: "/images/chips/chip-5.png",
+    size: "clamp(24px, 2.6vw, 36px)",
+    top: "19%",
+    left: "50%",
+    rotateDeg: 6,
+    opacity: 0.48,
+    driftY: 6,
+    driftRotate: 4,
+    duration: 5.6,
+    delay: 1.6,
+    blurPx: 2,
+  },
+  {
+    src: "/images/chips/chip-6.png",
+    size: "clamp(64px, 7.2vw, 102px)",
+    top: "25%",
+    left: "49%",
+    rotateDeg: 22,
+    opacity: 1,
+    driftY: 11,
+    driftRotate: 9,
+    duration: 4.9,
+    delay: 0.2,
+  },
+  {
+    src: "/images/chips/chip-7.png",
+    size: "clamp(28px, 3.1vw, 44px)",
+    top: "27%",
+    left: "55%",
+    rotateDeg: 16,
+    opacity: 0.9,
+    driftY: 8,
+    driftRotate: 7,
+    duration: 4.3,
+    delay: 0.5,
+  },
+  {
+    src: "/images/chips/chip-3.png",
+    size: "clamp(26px, 2.9vw, 38px)",
+    top: "48%",
+    left: "63%",
+    rotateDeg: 14,
+    opacity: 0.42,
+    driftY: 7,
+    driftRotate: 6,
+    duration: 5.2,
+    delay: 1.0,
+    blurPx: 3,
+  },
+  {
+    src: "/images/chips/chip-4.png",
+    size: "clamp(50px, 5.4vw, 78px)",
+    top: "53%",
+    left: "60%",
+    rotateDeg: 20,
+    opacity: 0.95,
+    driftY: 11,
+    driftRotate: 9,
+    duration: 4.6,
+    delay: 0.7,
+  },
+];
+
+function FloatingChips({
+  hidden,
+  entering,
+  reduceMotion,
+}: {
+  hidden: boolean;
+  entering: boolean;
+  reduceMotion: boolean;
+}) {
+  const fadeOut = hidden && !entering;
+  const fadeIn = entering;
+
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 z-[5] overflow-hidden"
+      style={{
+        opacity: fadeOut ? 0 : fadeIn ? 1 : hidden ? 0 : 1,
+        transition: fadeOut
+          ? `opacity ${CHIP_FADE_OUT_MS}ms ease-out`
+          : fadeIn
+            ? `opacity ${CHIP_FADE_IN_MS}ms ease-out ${CHIP_FADE_IN_DELAY_MS}ms`
+            : "opacity 300ms ease-out",
+      }}
+      aria-hidden
+    >
+      {FLOATING_CHIPS.map((chip, i) => (
+        <motion.div
+          key={`chip-${i}`}
+          className="absolute will-change-transform"
+          style={{
+            top: chip.top,
+            left: chip.left,
+            width: chip.size,
+            opacity: chip.opacity,
+          }}
+          animate={
+            reduceMotion || hidden
+              ? { y: 0, rotate: chip.rotateDeg }
+              : {
+                  y: [0, -chip.driftY, 0, chip.driftY, 0],
+                  rotate: [
+                    chip.rotateDeg,
+                    chip.rotateDeg + chip.driftRotate,
+                    chip.rotateDeg,
+                    chip.rotateDeg - chip.driftRotate,
+                    chip.rotateDeg,
+                  ],
+                }
+          }
+          transition={
+            reduceMotion || hidden
+              ? { duration: 0.4 }
+              : {
+                  y: {
+                    duration: chip.duration,
+                    ease: "easeInOut",
+                    repeat: Infinity,
+                    repeatType: "mirror" as const,
+                    delay: chip.delay,
+                  },
+                  rotate: {
+                    duration: chip.duration * 1.1,
+                    ease: "easeInOut",
+                    repeat: Infinity,
+                    repeatType: "mirror" as const,
+                    delay: chip.delay,
+                  },
+                }
+          }
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={chip.src}
+            alt=""
+            className="h-auto w-full drop-shadow-lg"
+            style={
+              chip.blurPx != null
+                ? { filter: `blur(${chip.blurPx}px)` }
+                : undefined
+            }
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+          />
+        </motion.div>
+      ))}
+      {/* TODO: new item entry here — incoming element for next slide */}
+    </div>
+  );
+}
+
+type TransPhase = "idle" | "wipe-and-exit" | "enter-new";
 
 export function HeroSlider() {
   const [index, setIndex] = useState(0);
@@ -87,17 +378,25 @@ export function HeroSlider() {
   const [isExploded, setIsExploded] = useState(false);
   const burgerAreaRef = useRef<HTMLDivElement | null>(null);
   const [heroExited, setHeroExited] = useState(false);
-  const [animPhase, setAnimPhase] = useState<HeroAnimPhase>("idle");
-  /** After slide change: first paint off-screen below, then animate in */
-  const [enterPlay, setEnterPlay] = useState(false);
 
+  const [transPhase, setTransPhase] = useState<TransPhase>("idle");
+  const [burgerPhase, setBurgerPhase] = useState<
+    "idle" | "melting-exit" | "assembling-enter"
+  >("idle");
+  const [bgWipeTarget, setBgWipeTarget] = useState<string | null>(null);
+  const [bgWipeActive, setBgWipeActive] = useState(false);
+
+  const pendingIndexRef = useRef<number | null>(null);
   const lastNavRef = useRef(0);
   const transitioningRef = useRef(false);
-  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const enterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const enterRafRef = useRef<number | null>(null);
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
-  const slide: HeroSlide = heroSlides[index];
+  const slide: HeroSlide = heroSlides[index]!;
+
+  const clearTimers = useCallback(() => {
+    timersRef.current.forEach(clearTimeout);
+    timersRef.current = [];
+  }, []);
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -105,14 +404,6 @@ export function HeroSlider() {
     const onChange = () => setReduceMotion(mq.matches);
     mq.addEventListener?.("change", onChange);
     return () => mq.removeEventListener?.("change", onChange);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
-      if (enterTimerRef.current) clearTimeout(enterTimerRef.current);
-      if (enterRafRef.current != null) cancelAnimationFrame(enterRafRef.current);
-    };
   }, []);
 
   useEffect(() => {
@@ -133,18 +424,28 @@ export function HeroSlider() {
       if (window.scrollY < 4 && heroExited) {
         setHeroExited(false);
         setIndex(heroSlides.length - 1);
-        setAnimPhase("idle");
         transitioningRef.current = false;
-        if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
-        if (enterTimerRef.current) clearTimeout(enterTimerRef.current);
-        if (enterRafRef.current != null) cancelAnimationFrame(enterRafRef.current);
-        setEnterPlay(false);
         setIsExploded(false);
+        setTransPhase("idle");
+        setBurgerPhase("idle");
+        setBgWipeTarget(null);
+        setBgWipeActive(false);
+        pendingIndexRef.current = null;
+        clearTimers();
       }
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
-  }, [heroExited]);
+  }, [heroExited, clearTimers]);
+
+  const handleMeltExitComplete = useCallback(() => {
+    /* Time-driven transition; index switches on timer */
+  }, []);
+
+  const handleAssembleEnterComplete = useCallback(() => {
+    setBurgerPhase("idle");
+    transitioningRef.current = false;
+  }, []);
 
   const runTransition = useCallback(
     (targetIndex: number) => {
@@ -153,48 +454,52 @@ export function HeroSlider() {
       if (transitioningRef.current) return;
       if (Date.now() - lastNavRef.current < HERO_NAV_DEBOUNCE_MS) return;
 
+      lastNavRef.current = Date.now();
+      transitioningRef.current = true;
+      clearTimers();
+
       if (reduceMotion) {
-        lastNavRef.current = Date.now();
         setIndex(targetIndex);
         setIsExploded(false);
+        setBurgerPhase("idle");
+        setTransPhase("idle");
+        setBgWipeTarget(null);
+        setBgWipeActive(false);
+        pendingIndexRef.current = null;
+        transitioningRef.current = false;
         return;
       }
 
-      lastNavRef.current = Date.now();
-      transitioningRef.current = true;
-      setEnterPlay(false);
-      setAnimPhase("exiting");
+      const target = heroSlides[targetIndex]!;
+      pendingIndexRef.current = targetIndex;
+      setIsExploded(false);
 
-      if (exitTimerRef.current) clearTimeout(exitTimerRef.current);
-      if (enterTimerRef.current) clearTimeout(enterTimerRef.current);
-      if (enterRafRef.current != null) cancelAnimationFrame(enterRafRef.current);
+      setTransPhase("wipe-and-exit");
+      setBurgerPhase("melting-exit");
+      setBgWipeTarget(target.background);
 
-      exitTimerRef.current = setTimeout(() => {
+      const t1 = setTimeout(() => {
+        setBgWipeActive(true);
+      }, 16);
+      timersRef.current.push(t1);
+
+      const switchMs = BG_WIPE_MS * 0.65;
+      const t2 = setTimeout(() => {
         setIndex(targetIndex);
-        setIsExploded(false);
-        setAnimPhase("entering");
-        setEnterPlay(false);
+        setTransPhase("enter-new");
+        setBurgerPhase("assembling-enter");
+        setBgWipeTarget(null);
+        setBgWipeActive(false);
+        pendingIndexRef.current = null;
+      }, switchMs);
+      timersRef.current.push(t2);
 
-        const kickEnter = () => {
-          enterRafRef.current = requestAnimationFrame(() => {
-            enterRafRef.current = requestAnimationFrame(() => {
-              enterRafRef.current = null;
-              setEnterPlay(true);
-            });
-          });
-        };
-        kickEnter();
-
-        enterTimerRef.current = setTimeout(() => {
-          setAnimPhase("idle");
-          setEnterPlay(false);
-          transitioningRef.current = false;
-          enterTimerRef.current = null;
-        }, HERO_TRANS_MS);
-        exitTimerRef.current = null;
-      }, HERO_TRANS_MS);
+      const t3 = setTimeout(() => {
+        setTransPhase("idle");
+      }, TRANSITION_MS);
+      timersRef.current.push(t3);
     },
-    [index, reduceMotion],
+    [index, reduceMotion, clearTimers],
   );
 
   const tryAdvance = useCallback(
@@ -271,7 +576,6 @@ export function HeroSlider() {
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [isExploded]);
 
-  /** Lock document scroll while exploded so the hero stays fixed in place. */
   useEffect(() => {
     if (!isExploded) return;
     const html = document.documentElement;
@@ -286,29 +590,11 @@ export function HeroSlider() {
     };
   }, [isExploded]);
 
-  const textMotionTransform = (() => {
-    if (reduceMotion || animPhase === "idle") return "translateY(0)";
-    if (animPhase === "exiting") return "translateY(-100vh)";
-    return enterPlay ? "translateY(0)" : "translateY(100vh)";
-  })();
+  const burgerScrollLayerMotion = "idle" as const;
+  const isWiping = transPhase === "wipe-and-exit";
+  const isEntering = transPhase === "enter-new";
 
-  const textMotionTransition =
-    reduceMotion || animPhase === "idle"
-      ? undefined
-      : animPhase === "exiting" || (animPhase === "entering" && enterPlay)
-        ? `transform ${HERO_TRANS_MS}ms ${HERO_TRANS_EASE}`
-        : undefined;
-
-  const burgerScrollLayerMotion =
-    reduceMotion || isExploded
-      ? ("idle" as const)
-      : animPhase === "idle"
-        ? ("idle" as const)
-        : animPhase === "exiting"
-          ? ("exit" as const)
-          : enterPlay
-            ? ("enterTight" as const)
-            : ("enterLoose" as const);
+  const HERO_TRANS_EASE = "cubic-bezier(0.22, 0.94, 0.32, 1)";
 
   return (
     <section
@@ -317,30 +603,34 @@ export function HeroSlider() {
       aria-roledescription="carousel"
     >
       <span className="sr-only" aria-live="polite">
-        Slide {index + 1} of {heroSlides.length}: {slide.title}. {slide.featuredItemName}{" "}
-        {slide.price}.
+        Slide {index + 1} of {heroSlides.length}: {slide.title}.{" "}
+        {slide.featuredItemName} {slide.price}.
       </span>
 
-      {heroSlides.map((s, i) => (
-        <div
-          key={s.id}
-          aria-hidden={i !== index}
-          className={cn(
-            "absolute inset-0 z-0",
-            s.background,
-            i === index ? "opacity-100" : "opacity-0",
-          )}
-          style={
-            reduceMotion
-              ? undefined
-              : {
-                  transition: `opacity ${HERO_TRANS_MS}ms ${HERO_TRANS_EASE}`,
-                }
-          }
-        />
-      ))}
+      <div className={cn("absolute inset-0 z-0", slide.background)} />
 
-      <div className="pointer-events-none absolute inset-0 z-[1] bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(0,0,0,0.1)_100%)]" />
+      {bgWipeTarget && (
+        <div
+          className={cn(
+            "absolute inset-0 z-[22] will-change-transform",
+            bgWipeTarget,
+          )}
+          style={{
+            transform: bgWipeActive ? "translateY(0)" : "translateY(100%)",
+            transition: bgWipeActive
+              ? `transform ${BG_WIPE_MS}ms ${BG_WIPE_EASE}`
+              : "none",
+          }}
+        />
+      )}
+
+      <div className="pointer-events-none absolute inset-0 z-[3] bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(0,0,0,0.1)_100%)]" />
+
+      <FloatingChips
+        hidden={isExploded || isWiping}
+        entering={isEntering}
+        reduceMotion={reduceMotion}
+      />
 
       <OutlineSideText />
 
@@ -378,31 +668,21 @@ export function HeroSlider() {
         </div>
       </div>
 
-      {/* ── Headline: absolutely positioned, never affected by burger ── */}
       <div
-        className="absolute inset-x-0 top-0 z-[20] flex min-h-[100dvh] flex-col items-center px-5 pt-24 sm:px-8 sm:pt-28 md:pt-32 pointer-events-none"
+        className={cn(
+          "absolute inset-x-0 top-0 z-[20] flex min-h-[100dvh] flex-col items-center px-5 pt-24 sm:px-8 sm:pt-28 md:pt-32 pointer-events-none overflow-hidden",
+          isExploded && "opacity-0 transition-opacity duration-300",
+        )}
       >
-        <div
-          className={cn(
-            "flex w-full flex-col items-center will-change-[opacity,transform,filter] transition-[opacity,transform,filter] duration-300 ease-out",
-            isExploded
-              ? "pointer-events-none opacity-0 -translate-y-2 blur-[2px]"
-              : "pointer-events-auto opacity-100 translate-y-0 blur-0",
+        <div className="pointer-events-auto">
+          {isEntering ? (
+            <HeroTextRiseIn key={`text-enter-${index}`} slide={slide} />
+          ) : (
+            <HeroTextStatic key={`text-${index}`} slide={slide} />
           )}
-          style={{
-            transform: isExploded
-              ? "translateY(-8px)"
-              : textMotionTransform,
-            transition: textMotionTransition
-              ? `${textMotionTransition}, opacity 300ms ease-out, filter 300ms ease-out`
-              : "opacity 300ms ease-out, transform 300ms ease-out, filter 300ms ease-out",
-          }}
-        >
-          <HeroHeadlineStack index={index} />
         </div>
       </div>
 
-      {/* ── Burger: absolutely positioned, isolated from everything else ── */}
       <div
         ref={burgerAreaRef}
         className={cn(
@@ -428,6 +708,9 @@ export function HeroSlider() {
             garnishType={slide.garnishType}
             reduceMotion={reduceMotion}
             scrollLayerMotion={burgerScrollLayerMotion}
+            slideTransition={burgerPhase}
+            onExitComplete={handleMeltExitComplete}
+            onEnterComplete={handleAssembleEnterComplete}
           />
           {isExploded && (
             <div className="mt-6 flex flex-col items-center gap-3">
